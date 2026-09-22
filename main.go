@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,20 @@ func (a *app) files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 200<<20)
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		name, err := url.QueryUnescape(r.Header.Get("X-File-Name"))
+		if err != nil || name == "" || r.Header.Get("X-Key-Package") == "" {
+			jsonResponse(w, 400, map[string]string{"error": "encrypted stream metadata is missing"})
+			return
+		}
+		meta, err := a.saveEncrypted(user, filepath.Base(name), r.Header.Get("X-Key-Package"), r.Body)
+		if err != nil {
+			jsonResponse(w, 500, map[string]string{"error": "encrypted upload failed"})
+			return
+		}
+		jsonResponse(w, 201, meta)
+		return
+	}
 	if err := r.ParseMultipartForm(200 << 20); err != nil {
 		jsonResponse(w, 413, map[string]string{"error": "encrypted upload is too large"})
 		return
@@ -330,33 +345,39 @@ func (a *app) files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	meta, err := a.saveEncrypted(user, filepath.Base(header.Filename), r.Header.Get("X-Key-Package"), file)
+	if err != nil {
+		jsonResponse(w, 500, map[string]string{"error": "encrypted upload failed"})
+		return
+	}
+	jsonResponse(w, 201, meta)
+}
+
+func (a *app) saveEncrypted(user, name, keyPackage string, input io.Reader) (FileMeta, error) {
 	idBytes := make([]byte, 16)
 	_, _ = rand.Read(idBytes)
 	id := hex.EncodeToString(idBytes)
 	stored := filepath.Join(a.filesDir, id+".blob")
 	out, err := os.OpenFile(stored, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		jsonResponse(w, 500, map[string]string{"error": "storage failed"})
-		return
+		return FileMeta{}, err
 	}
-	size, copyErr := io.Copy(out, file)
+	size, copyErr := io.Copy(out, input)
 	closeErr := out.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(stored)
-		jsonResponse(w, 500, map[string]string{"error": "encrypted upload failed"})
-		return
+		return FileMeta{}, errors.New("encrypted upload failed")
 	}
-	meta := FileMeta{ID: id, Owner: user, Name: filepath.Base(header.Filename), StoredName: stored, Size: size, CreatedAt: time.Now().UTC(), KeyPackage: r.Header.Get("X-Key-Package")}
+	meta := FileMeta{ID: id, Owner: user, Name: name, StoredName: stored, Size: size, CreatedAt: time.Now().UTC(), KeyPackage: keyPackage}
 	a.mu.Lock()
 	a.data.Files[id] = meta
 	err = a.saveLocked()
 	a.mu.Unlock()
 	if err != nil {
 		_ = os.Remove(stored)
-		jsonResponse(w, 500, map[string]string{"error": "metadata save failed"})
-		return
+		return FileMeta{}, err
 	}
-	jsonResponse(w, 201, meta)
+	return meta, nil
 }
 func (a *app) file(w http.ResponseWriter, r *http.Request) {
 	user := a.currentUser(r)
