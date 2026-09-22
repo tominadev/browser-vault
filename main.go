@@ -69,6 +69,7 @@ func main() {
 	mux.HandleFunc("/api/logout", a.logout)
 	mux.HandleFunc("/api/admin-keys", a.adminKeys)
 	mux.HandleFunc("/api/admin/users", a.adminUsers)
+	mux.HandleFunc("/api/admin/files", a.adminFiles)
 	mux.HandleFunc("/api/files", a.files)
 	mux.HandleFunc("/api/files/", a.file)
 	server := &http.Server{Addr: env("BROWSER_VAULT_ADDR", ":8080"), Handler: securityHeaders(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute}
@@ -298,6 +299,30 @@ func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, 200, users)
 }
 
+func (a *app) adminFiles(w http.ResponseWriter, r *http.Request) {
+	username := a.currentUser(r)
+	if username == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "sign in required"})
+		return
+	}
+	a.mu.RLock()
+	admin := a.data.Users[username].Admin
+	if !admin {
+		a.mu.RUnlock()
+		jsonResponse(w, http.StatusForbidden, map[string]string{"error": "administrator access required"})
+		return
+	}
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	list := []FileMeta{}
+	for _, file := range a.data.Files {
+		if owner == "" || file.Owner == owner {
+			list = append(list, file)
+		}
+	}
+	a.mu.RUnlock()
+	jsonResponse(w, http.StatusOK, list)
+}
+
 func (a *app) files(w http.ResponseWriter, r *http.Request) {
 	user := a.currentUser(r)
 	if user == "" {
@@ -388,8 +413,9 @@ func (a *app) file(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/")
 	a.mu.RLock()
 	meta, ok := a.data.Files[id]
+	isAdmin := a.data.Users[user].Admin
 	a.mu.RUnlock()
-	if !ok || meta.Owner != user {
+	if !ok || (meta.Owner != user && !(isAdmin && r.URL.Query().Get("admin") == "1")) {
 		http.NotFound(w, r)
 		return
 	}

@@ -10,7 +10,7 @@ Browser Vault is a client-side encrypted file vault. The browser generates and u
 - User RSA-OAEP public keys are stored as the foundation for administrator key wrapping.
 - Each file key is wrapped for the current user and for every administrator public key returned by the server.
 - Password changes re-wrap the same user key and the encrypted private key after the old password unlocks them, so existing files keep working.
-- The administrator browser workflow for opening administrator key packages is still the next module.
+- Administrators can open user file key packages in the browser and download user files after their private key is unlocked locally.
 
 The server can still alter the JavaScript it serves. Production use requires HTTPS, a trusted deployment pipeline, a strict Content Security Policy, and a way to verify the frontend bundle.
 
