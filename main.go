@@ -16,12 +16,14 @@ import (
 )
 
 type User struct {
-	Username            string `json:"username"`
-	Salt                string `json:"salt"`
-	AuthVerifier        string `json:"auth_verifier"`
-	PublicKey           string `json:"public_key"`
-	EncryptedPrivateKey string `json:"encrypted_private_key"`
-	Admin               bool   `json:"admin"`
+	Username            string            `json:"username"`
+	Salt                string            `json:"salt"`
+	AuthVerifier        string            `json:"auth_verifier"`
+	PublicKey           string            `json:"public_key"`
+	EncryptedUserKey    string            `json:"encrypted_user_key"`
+	EncryptedPrivateKey string            `json:"encrypted_private_key"`
+	AdminWraps          map[string]string `json:"admin_wraps"`
+	Admin               bool              `json:"admin"`
 }
 
 type FileMeta struct {
@@ -61,8 +63,11 @@ func main() {
 	mux.HandleFunc("/api/auth-info", a.authInfo)
 	mux.HandleFunc("/api/register", a.register)
 	mux.HandleFunc("/api/login", a.login)
+	mux.HandleFunc("/api/me", a.me)
+	mux.HandleFunc("/api/account/password", a.changePassword)
 	mux.HandleFunc("/api/logout", a.logout)
 	mux.HandleFunc("/api/admin-keys", a.adminKeys)
+	mux.HandleFunc("/api/admin/users", a.adminUsers)
 	mux.HandleFunc("/api/files", a.files)
 	mux.HandleFunc("/api/files/", a.file)
 	server := &http.Server{Addr: env("BROWSER_VAULT_ADDR", ":8080"), Handler: securityHeaders(mux), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute}
@@ -122,8 +127,8 @@ func decodeJSON(r *http.Request, value any) error {
 }
 
 type registerRequest struct {
-	Username, Salt, AuthVerifier, PublicKey, EncryptedPrivateKey string
-	AdminWraps                                                   map[string]string `json:"admin_wraps"`
+	Username, Salt, AuthVerifier, PublicKey, EncryptedUserKey, EncryptedPrivateKey string
+	AdminWraps                                                                     map[string]string `json:"admin_wraps"`
 }
 
 func (a *app) register(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +142,7 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
-	if len(req.Username) < 3 || len(req.Username) > 64 || req.Salt == "" || req.AuthVerifier == "" || req.PublicKey == "" || req.EncryptedPrivateKey == "" {
+	if len(req.Username) < 3 || len(req.Username) > 64 || req.Salt == "" || req.AuthVerifier == "" || req.PublicKey == "" || req.EncryptedUserKey == "" || req.EncryptedPrivateKey == "" {
 		jsonResponse(w, 400, map[string]string{"error": "missing registration fields"})
 		return
 	}
@@ -148,7 +153,7 @@ func (a *app) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	admin := len(a.data.Users) == 0
-	a.data.Users[req.Username] = User{Username: req.Username, Salt: req.Salt, AuthVerifier: req.AuthVerifier, PublicKey: req.PublicKey, EncryptedPrivateKey: req.EncryptedPrivateKey, Admin: admin}
+	a.data.Users[req.Username] = User{Username: req.Username, Salt: req.Salt, AuthVerifier: req.AuthVerifier, PublicKey: req.PublicKey, EncryptedUserKey: req.EncryptedUserKey, EncryptedPrivateKey: req.EncryptedPrivateKey, AdminWraps: req.AdminWraps, Admin: admin}
 	if err := a.saveLocked(); err != nil {
 		jsonResponse(w, 500, map[string]string{"error": "save failed"})
 		return
@@ -167,6 +172,46 @@ func (a *app) authInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, 200, map[string]string{"salt": user.Salt})
+}
+
+func (a *app) me(w http.ResponseWriter, r *http.Request) {
+	username := a.currentUser(r)
+	if username == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "sign in required"})
+		return
+	}
+	a.mu.RLock()
+	user := a.data.Users[username]
+	a.mu.RUnlock()
+	jsonResponse(w, http.StatusOK, user)
+}
+
+func (a *app) changePassword(w http.ResponseWriter, r *http.Request) {
+	username := a.currentUser(r)
+	if username == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]string{"error": "sign in required"})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct{ Salt, AuthVerifier, EncryptedUserKey string }
+	if err := decodeJSON(r, &req); err != nil || req.Salt == "" || req.AuthVerifier == "" || req.EncryptedUserKey == "" {
+		jsonResponse(w, 400, map[string]string{"error": "invalid password update"})
+		return
+	}
+	a.mu.Lock()
+	user := a.data.Users[username]
+	user.Salt, user.AuthVerifier, user.EncryptedUserKey = req.Salt, req.AuthVerifier, req.EncryptedUserKey
+	a.data.Users[username] = user
+	err := a.saveLocked()
+	a.mu.Unlock()
+	if err != nil {
+		jsonResponse(w, 500, map[string]string{"error": "save failed"})
+		return
+	}
+	jsonResponse(w, 200, map[string]bool{"ok": true})
 }
 func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -228,6 +273,28 @@ func (a *app) adminKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonResponse(w, 200, keys)
+}
+
+func (a *app) adminUsers(w http.ResponseWriter, r *http.Request) {
+	if user := a.currentUser(r); user == "" {
+		jsonResponse(w, 401, map[string]string{"error": "sign in required"})
+		return
+	} else {
+		a.mu.RLock()
+		isAdmin := a.data.Users[user].Admin
+		a.mu.RUnlock()
+		if !isAdmin {
+			jsonResponse(w, 403, map[string]string{"error": "administrator access required"})
+			return
+		}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	users := make([]User, 0, len(a.data.Users))
+	for _, user := range a.data.Users {
+		users = append(users, user)
+	}
+	jsonResponse(w, 200, users)
 }
 
 func (a *app) files(w http.ResponseWriter, r *http.Request) {
