@@ -197,14 +197,14 @@ func (a *app) changePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req struct{ Salt, AuthVerifier, EncryptedUserKey string }
-	if err := decodeJSON(r, &req); err != nil || req.Salt == "" || req.AuthVerifier == "" || req.EncryptedUserKey == "" {
+	var req struct{ Salt, AuthVerifier, EncryptedUserKey, EncryptedPrivateKey string }
+	if err := decodeJSON(r, &req); err != nil || req.Salt == "" || req.AuthVerifier == "" || req.EncryptedUserKey == "" || req.EncryptedPrivateKey == "" {
 		jsonResponse(w, 400, map[string]string{"error": "invalid password update"})
 		return
 	}
 	a.mu.Lock()
 	user := a.data.Users[username]
-	user.Salt, user.AuthVerifier, user.EncryptedUserKey = req.Salt, req.AuthVerifier, req.EncryptedUserKey
+	user.Salt, user.AuthVerifier, user.EncryptedUserKey, user.EncryptedPrivateKey = req.Salt, req.AuthVerifier, req.EncryptedUserKey, req.EncryptedPrivateKey
 	a.data.Users[username] = user
 	err := a.saveLocked()
 	a.mu.Unlock()
